@@ -1,17 +1,18 @@
 import os
 import asyncio
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Bot
 from telegram.constants import ParseMode
 from aiohttp import web
 import logging
 
 # ================ НАСТРОЙКИ ================
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_ANALYST_BOT_TOKEN')
+# Используем те же имена переменных что и в первом боте
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CHANNEL_ID = os.environ.get('CHANNEL_ID')
 CMC_API_KEY = os.environ.get('CMC_API_KEY')
-PORT = int(os.environ.get('PORT', 10001))  # Другой порт для второго бота
+PORT = int(os.environ.get('PORT', 10001))
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +25,6 @@ CMC_FEAR_GREED_URL = "https://api.alternative.me/fng/"
 
 # Ключевые активы для анализа
 KEY_CRYPTO_SYMBOLS = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'AVAX', 'DOT', 'LINK', 'MATIC']
-STOCKS_SYMBOLS = ['NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA']
 
 # Хранилище предыдущих данных
 previous_data = {}
@@ -271,22 +271,20 @@ async def send_analyst_digest():
             
             logger.info(f"✅ Аналитический дайджест отправлен: {datetime.now()}")
             
-            # Ждем 4 часа до следующего дайджеста (можно настроить интервал)
-            await asyncio.sleep(14400)  # 4 часа
+            # Ждем 4 часа до следующего дайджеста
+            await asyncio.sleep(14400)
             
         except Exception as e:
             logger.error(f"❌ Ошибка в send_analyst_digest: {e}")
-            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
+            await asyncio.sleep(300)
 
 async def health_check(request):
     return web.Response(text="🎯 MarvelMarket Analyst Bot is running!")
 
 async def start_background_tasks(app):
-    # Запускаем задачу в фоне
     app['analyst_task'] = asyncio.create_task(send_analyst_digest())
 
 async def cleanup_background_tasks(app):
-    # Останавливаем задачу при завершении
     if 'analyst_task' in app:
         app['analyst_task'].cancel()
         try:
@@ -296,34 +294,31 @@ async def cleanup_background_tasks(app):
 
 async def create_app():
     app = web.Application()
-    
-    # Добавляем маршруты
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
-    
-    # Запускаем фоновые задачи
     app.on_startup.append(start_background_tasks)
     app.on_cleanup.append(cleanup_background_tasks)
-    
     return app
 
 async def main():
     app = await create_app()
     runner = web.AppRunner(app)
     await runner.setup()
-    
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     
     logger.info(f"🌐 HTTP сервер аналитика запущен на порту {PORT}")
     logger.info("🎯 MarvelMarket Analyst Bot запущен!")
     
-    # Бесконечный цикл для поддержания работы
+    # Проверяем переменные
+    logger.info(f"TELEGRAM_BOT_TOKEN: {'✅' if TELEGRAM_BOT_TOKEN else '❌'}")
+    logger.info(f"CHANNEL_ID: {'✅' if CHANNEL_ID else '❌'}")
+    logger.info(f"CMC_API_KEY: {'✅' if CMC_API_KEY else '❌'}")
+    
     while True:
         await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    # Проверяем наличие обязательных переменных
     if not all([TELEGRAM_BOT_TOKEN, CHANNEL_ID, CMC_API_KEY]):
         logger.error("❌ Не установлены все необходимые переменные окружения!")
         exit(1)
