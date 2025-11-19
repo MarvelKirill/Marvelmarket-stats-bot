@@ -1,258 +1,332 @@
 import os
 import asyncio
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Bot
 from telegram.constants import ParseMode
 from aiohttp import web
+import logging
 
 # ================ НАСТРОЙКИ ================
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_ANALYST_BOT_TOKEN')
 CHANNEL_ID = os.environ.get('CHANNEL_ID')
 CMC_API_KEY = os.environ.get('CMC_API_KEY')
-PORT = int(os.environ.get('PORT', 10000))
+PORT = int(os.environ.get('PORT', 10001))  # Другой порт для второго бота
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ================ API URLs ================
 CMC_CRYPTO_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 CMC_GLOBAL_URL = "https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest"
 CMC_FEAR_GREED_URL = "https://api.alternative.me/fng/"
-CMC_GOLD_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-STOCKS_API_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
 
-MUST_INCLUDE = ['BTC', 'ETH', 'SOL']
-TOP_STOCKS = ['NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA']
+# Ключевые активы для анализа
+KEY_CRYPTO_SYMBOLS = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'AVAX', 'DOT', 'LINK', 'MATIC']
+STOCKS_SYMBOLS = ['NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA']
+
+# Хранилище предыдущих данных
+previous_data = {}
 
 # ================ ФУНКЦИИ ================
 
-async def get_crypto_data():
+async def make_cmc_request(url, params=None):
+    """Универсальная функция для запросов к CMC API"""
     headers = {
         'X-CMC_PRO_API_KEY': CMC_API_KEY,
         'Accept': 'application/json'
     }
-    params = {'limit': 30, 'convert': 'USD'}
     
-    async with aiohttp.ClientSession() as session:
-        async with session.get(CMC_CRYPTO_URL, headers=headers, params=params) as response:
-            data = await response.json()
-            return data['data']
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status == 200:
+                    return await response.json()
+                else:
+                    logger.error(f"Ошибка CMC API {url}: {response.status}")
+                    return None
+    except Exception as e:
+        logger.error(f"Ошибка запроса к CMC {url}: {e}")
+        return None
+
+async def get_crypto_data(limit=50):
+    """Получаем данные по криптовалютам"""
+    params = {'limit': limit, 'convert': 'USD'}
+    data = await make_cmc_request(CMC_CRYPTO_URL, params)
+    return data['data'] if data else []
 
 async def get_global_metrics():
-    headers = {
-        'X-CMC_PRO_API_KEY': CMC_API_KEY,
-        'Accept': 'application/json'
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(CMC_GLOBAL_URL, headers=headers) as response:
-            data = await response.json()
-            return data['data']
+    """Получаем глобальную статистику"""
+    data = await make_cmc_request(CMC_GLOBAL_URL)
+    return data['data'] if data else None
 
 async def get_fear_greed_index():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(CMC_FEAR_GREED_URL) as response:
-            data = await response.json()
-            return data['data'][0]
-
-async def get_gold_price():
-    headers = {
-        'X-CMC_PRO_API_KEY': CMC_API_KEY,
-        'Accept': 'application/json'
-    }
-    params = {'symbol': 'PAXG', 'convert': 'USD'}
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(CMC_GOLD_URL, headers=headers, params=params) as response:
-            data = await response.json()
-            return data['data']['PAXG']
-
-async def get_stocks_data():
-    symbols = ','.join(TOP_STOCKS)
-    params = {
-        'symbols': symbols,
-        'fields': 'symbol,regularMarketPrice,regularMarketChangePercent,marketCap'
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.get(STOCKS_API_URL, params=params) as response:
-            data = await response.json()
-            return data['quoteResponse']['results']
-
-def format_number(num):
-    if num >= 1_000_000_000_000:
-        return f"${num/1_000_000_000_000:.2f}T"
-    elif num >= 1_000_000_000:
-        return f"${num/1_000_000_000:.2f}B"
-    elif num >= 1_000_000:
-        return f"${num/1_000_000:.2f}M"
-    else:
-        return f"${num:,.2f}"
-
-def get_emoji(change):
-    if change > 5:
-        return "🚀"
-    elif change > 0:
-        return "📈"
-    elif change > -5:
-        return "📉"
-    else:
-        return "💀"
-
-def get_fear_greed_emoji(value):
-    if value < 25:
-        return "😱"
-    elif value < 45:
-        return "😰"
-    elif value < 55:
-        return "😐"
-    elif value < 75:
-        return "😊"
-    else:
-        return "🤑"
-
-async def create_crypto_message():
+    """Получаем индекс страха и жадности"""
     try:
-        cryptos = await get_crypto_data()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CMC_FEAR_GREED_URL) as response:
+                data = await response.json()
+                return data['data'][0]
+    except Exception as e:
+        logger.error(f"Ошибка получения индекса страха/жадности: {e}")
+        return {'value': 50, 'value_classification': 'Neutral'}
+
+def analyze_market_sentiment(cryptos, global_data, fear_greed):
+    """Анализируем настроение рынка"""
+    sentiments = []
+    
+    # Анализ глобальных метрик
+    if global_data:
+        total_change = global_data['quote']['USD']['total_market_cap_yesterday_percentage_change']
+        if total_change > 3:
+            sentiments.append("📈 <b>Бычий тренд</b> - рынок демонстрирует уверенный рост")
+        elif total_change > 0:
+            sentiments.append("↗️ <b>Умеренный рост</b> - позитивная динамика")
+        elif total_change > -3:
+            sentiments.append("↘️ <b>Коррекция</b> - незначительное снижение")
+        else:
+            sentiments.append("📉 <b>Медвежий тренд</b> - давление на рынке")
+    
+    # Анализ индекса страха/жадности
+    fg_value = int(fear_greed['value'])
+    if fg_value >= 75:
+        sentiments.append("😊 <b>Экстремальная жадность</b> - инвесторы активно покупают")
+    elif fg_value >= 55:
+        sentiments.append("🙂 <b>Жадность</b> - позитивные настроения")
+    elif fg_value >= 45:
+        sentiments.append("😐 <b>Нейтрально</b> - рынок в неопределенности")
+    elif fg_value >= 25:
+        sentiments.append("😟 <b>Страх</b> - осторожность преобладает")
+    else:
+        sentiments.append("😱 <b>Экстремальный страх</b> - возможности для покупок")
+    
+    return sentiments
+
+def analyze_crypto_movements(cryptos, previous_cryptos):
+    """Анализируем движения криптовалют"""
+    movements = []
+    
+    if not previous_cryptos:
+        return ["📊 <b>Первая аналитика</b> - отслеживаем начальные позиции"]
+    
+    current_prices = {c['symbol']: c['quote']['USD']['price'] for c in cryptos}
+    previous_prices = {c['symbol']: c['quote']['USD']['price'] for c in previous_cryptos}
+    
+    # Анализ ключевых активов
+    for symbol in KEY_CRYPTO_SYMBOLS:
+        if symbol in current_prices and symbol in previous_prices:
+            current_price = current_prices[symbol]
+            previous_price = previous_prices[symbol]
+            
+            if previous_price > 0:
+                change_percent = ((current_price - previous_price) / previous_price) * 100
+                
+                if abs(change_percent) > 8:
+                    direction = "🟢 выросла" if change_percent > 0 else "🔴 упала"
+                    movements.append(f"• <b>{symbol}</b> {direction} на <b>{abs(change_percent):.1f}%</b>")
+    
+    # Если значительных движений нет
+    if not movements:
+        movements.append("• Рынок демонстрирует <b>стабильность</b>, значительных колебаний нет")
+    
+    return movements
+
+def get_trading_recommendation(cryptos, fear_greed):
+    """Генерируем торговые рекомендации"""
+    recommendations = []
+    fg_value = int(fear_greed['value'])
+    
+    # Рекомендации на основе индекса страха/жадности
+    if fg_value <= 25:
+        recommendations.append("💰 <b>Отличная возможность для покупок</b> - рынок в страхе")
+    elif fg_value <= 45:
+        recommendations.append("📥 <b>Рассмотреть накопление</b> - хорошие точки входа")
+    elif fg_value >= 75:
+        recommendations.append("⚠️ <b>Осторожность с покупками</b> - рынок перегрет")
+    elif fg_value >= 55:
+        recommendations.append("📊 <b>Выборочные покупки</b> - искать недооцененные активы")
+    
+    # Анализ волатильности
+    price_changes = [abs(c['quote']['USD']['percent_change_24h']) for c in cryptos[:20]]
+    avg_volatility = sum(price_changes) / len(price_changes)
+    
+    if avg_volatility > 15:
+        recommendations.append("🎯 <b>Высокая волатильность</b> - используйте стоп-ордера")
+    elif avg_volatility > 8:
+        recommendations.append("⚡ <b>Умеренная волатильность</b> - подходит для свинг-трейдинга")
+    else:
+        recommendations.append("🛌 <b>Низкая волатильность</b> - рынок консолидируется")
+    
+    return recommendations
+
+def get_market_insights(cryptos, global_data):
+    """Получаем инсайты по рынку"""
+    insights = []
+    
+    # Анализ объема
+    if global_data:
+        volume_24h = global_data['quote']['USD']['total_volume_24h']
+        market_cap = global_data['quote']['USD']['total_market_cap']
+        volume_ratio = (volume_24h / market_cap) * 100 if market_cap > 0 else 0
+        
+        if volume_ratio > 8:
+            insights.append("💹 <b>Высокая активность</b> - значительный объем торгов")
+        elif volume_ratio > 4:
+            insights.append("📈 <b>Умеренная активность</b> - стабильный интерес")
+        else:
+            insights.append("📉 <b>Низкая активность</b> - рынок в ожидании")
+    
+    # Анализ альткойнов
+    top_10_changes = [c['quote']['USD']['percent_change_24h'] for c in cryptos[:10]]
+    positive_changes = sum(1 for change in top_10_changes if change > 0)
+    
+    if positive_changes >= 8:
+        insights.append("🌟 <b>Сила альткойнов</b> - большинство в плюсе")
+    elif positive_changes <= 3:
+        insights.append("🌒 <b>Слабость альткойнов</b> - преобладают продажи")
+    
+    return insights
+
+async def create_analyst_digest():
+    """Создаем аналитический дайджест"""
+    try:
+        logger.info("Создание аналитического дайджеста...")
+        
+        # Получаем текущие данные
+        current_cryptos = await get_crypto_data()
         global_data = await get_global_metrics()
         fear_greed = await get_fear_greed_index()
         
-        top_cryptos = []
-        must_have = []
+        if not current_cryptos:
+            return "❌ Не удалось получить данные для анализа"
         
-        for crypto in cryptos:
-            symbol = crypto['symbol']
-            if symbol in MUST_INCLUDE:
-                must_have.append(crypto)
-            else:
-                top_cryptos.append(crypto)
+        # Анализируем данные
+        sentiment = analyze_market_sentiment(current_cryptos, global_data, fear_greed)
+        movements = analyze_crypto_movements(current_cryptos, previous_data.get('cryptos'))
+        recommendations = get_trading_recommendation(current_cryptos, fear_greed)
+        insights = get_market_insights(current_cryptos, global_data)
         
-        remaining_slots = 10 - len(must_have)
-        final_list = must_have + top_cryptos[:remaining_slots]
-        final_list.sort(key=lambda x: x['cmc_rank'])
+        # Сохраняем текущие данные для следующего сравнения
+        previous_data['cryptos'] = current_cryptos
+        previous_data['timestamp'] = datetime.now()
         
-        message = "🔥 <b>КРИПТО РЫНОК</b> 🔥\n\n"
-        message += f"📊 <b>Общая капитализация:</b> {format_number(global_data['quote']['USD']['total_market_cap'])}\n"
-        message += f"📈 <b>Изменение 24ч:</b> {global_data['quote']['USD']['total_market_cap_yesterday_percentage_change']:.2f}%\n"
+        # Формируем сообщение
+        message = "🎯 <b>ANALYST DIGEST</b> 🎯\n\n"
         
-        fg_value = int(fear_greed['value'])
-        fg_emoji = get_fear_greed_emoji(fg_value)
-        message += f"{fg_emoji} <b>Индекс страха/жадности:</b> {fg_value} ({fear_greed['value_classification']})\n\n"
+        message += "📈 <b>НАСТРОЕНИЕ РЫНКА</b>\n"
+        for item in sentiment:
+            message += f"{item}\n"
+        message += "\n"
         
-        message += "━━━━━━━━━━━━━━━━━━\n\n"
-        message += "<b>ТОП-10 КРИПТОВАЛЮТ:</b>\n\n"
-        
-        for crypto in final_list:
-            name = crypto['name']
-            symbol = crypto['symbol']
-            price = crypto['quote']['USD']['price']
-            change_24h = crypto['quote']['USD']['percent_change_24h']
-            market_cap = crypto['quote']['USD']['market_cap']
-            emoji = get_emoji(change_24h)
-            
-            if price < 1:
-                price_str = f"${price:.6f}"
-            else:
-                price_str = f"${price:,.2f}"
-            
-            message += f"{emoji} <b>{symbol}</b> ({name})\n"
-            message += f"💰 {price_str} | "
-            message += f"{'🟢' if change_24h > 0 else '🔴'} {change_24h:+.2f}%\n"
-            message += f"📊 Cap: {format_number(market_cap)}\n\n"
-        
-        message += f"⏰ Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')} UTC\n"
-        message += "\n💎 <b>MarvelMarket</b> - Твой гид в мире крипты!"
-        
-        return message
-    
-    except Exception as e:
-        return f"❌ Ошибка при получении данных: {str(e)}"
-
-async def create_stocks_message():
-    try:
-        gold = await get_gold_price()
-        gold_price = gold['quote']['USD']['price']
-        gold_change = gold['quote']['USD']['percent_change_24h']
-        
-        stocks = await get_stocks_data()
-        
-        message = "🏆 <b>ЗОЛОТО И ТОП АКЦИИ</b> 🏆\n\n"
-        
-        message += "━━━━━━━━━━━━━━━━━━\n"
-        message += f"🥇 <b>ЗОЛОТО (PAXG)</b>\n"
-        message += f"💰 ${gold_price:,.2f}\n"
-        message += f"{'🟢' if gold_change > 0 else '🔴'} {gold_change:+.2f}% (24h)\n\n"
-        
-        message += "━━━━━━━━━━━━━━━━━━\n\n"
-        message += "<b>ТОП АКЦИИ США:</b>\n\n"
-        
-        for stock in stocks:
-            symbol = stock['symbol']
-            price = stock['regularMarketPrice']
-            change = stock.get('regularMarketChangePercent', 0)
-            market_cap = stock.get('marketCap', 0)
-            emoji = get_emoji(change)
-            
-            message += f"{emoji} <b>{symbol}</b>\n"
-            message += f"💰 ${price:,.2f} | "
-            message += f"{'🟢' if change > 0 else '🔴'} {change:+.2f}%\n"
-            if market_cap > 0:
-                message += f"📊 Cap: {format_number(market_cap)}\n"
+        if movements:
+            message += "⚡ <b>КЛЮЧЕВЫЕ ДВИЖЕНИЯ</b>\n"
+            for movement in movements:
+                message += f"{movement}\n"
             message += "\n"
         
-        message += f"⏰ Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')} UTC\n"
-        message += "\n💼 <b>MarvelMarket</b> - Следим за рынками вместе!"
+        if insights:
+            message += "🔍 <b>РЫНОЧНЫЕ ИНСАЙТЫ</b>\n"
+            for insight in insights:
+                message += f"{insight}\n"
+            message += "\n"
+        
+        message += "💡 <b>ТОРГОВЫЕ ИДЕИ</b>\n"
+        for recommendation in recommendations:
+            message += f"{recommendation}\n"
+        message += "\n"
+        
+        # Текущие показатели
+        if global_data:
+            total_cap = global_data['quote']['USD']['total_market_cap']
+            total_change = global_data['quote']['USD']['total_market_cap_yesterday_percentage_change']
+            message += f"📊 <b>ТЕКУЩИЕ ПОКАЗАТЕЛИ</b>\n"
+            message += f"• Капитализация: ${total_cap/1_000_000_000:.1f}B\n"
+            message += f"• Изменение за 24ч: {total_change:+.2f}%\n"
+            message += f"• Индекс страха/жадности: {fear_greed['value']} ({fear_greed['value_classification']})\n"
+        
+        message += f"\n⏰ Анализ от: {datetime.now().strftime('%d.%m.%Y %H:%M')} UTC\n"
+        message += "\n💎 <b>MarvelMarket Analytics</b> - Умные инсайты для ваших инвестиций!"
         
         return message
-    
+        
     except Exception as e:
-        return f"❌ Ошибка при получении данных: {str(e)}"
+        logger.error(f"Ошибка в create_analyst_digest: {e}", exc_info=True)
+        return f"❌ Ошибка при создании аналитического дайджеста: {str(e)}"
 
-async def send_updates():
+async def send_analyst_digest():
+    """Отправляем аналитический дайджест"""
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     
     while True:
         try:
-            crypto_msg = await create_crypto_message()
+            logger.info("Подготовка аналитического дайджеста...")
+            
+            message = await create_analyst_digest()
             await bot.send_message(
                 chat_id=CHANNEL_ID,
-                text=crypto_msg,
+                text=message,
                 parse_mode=ParseMode.HTML
             )
             
-            await asyncio.sleep(5)
+            logger.info(f"✅ Аналитический дайджест отправлен: {datetime.now()}")
             
-            stocks_msg = await create_stocks_message()
-            await bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=stocks_msg,
-                parse_mode=ParseMode.HTML
-            )
-            
-            print(f"✅ Обновление отправлено: {datetime.now()}")
-            
-            await asyncio.sleep(3600)
+            # Ждем 4 часа до следующего дайджеста (можно настроить интервал)
+            await asyncio.sleep(14400)  # 4 часа
             
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            await asyncio.sleep(300)
+            logger.error(f"❌ Ошибка в send_analyst_digest: {e}")
+            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
 
 async def health_check(request):
-    return web.Response(text="🚀 MarvelMarket Stats Bot is running!")
+    return web.Response(text="🎯 MarvelMarket Analyst Bot is running!")
 
-async def start_http_server():
+async def start_background_tasks(app):
+    # Запускаем задачу в фоне
+    app['analyst_task'] = asyncio.create_task(send_analyst_digest())
+
+async def cleanup_background_tasks(app):
+    # Останавливаем задачу при завершении
+    if 'analyst_task' in app:
+        app['analyst_task'].cancel()
+        try:
+            await app['analyst_task']
+        except asyncio.CancelledError:
+            pass
+
+async def create_app():
     app = web.Application()
+    
+    # Добавляем маршруты
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
     
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    print(f"🌐 HTTP сервер запущен на порту {PORT}")
+    # Запускаем фоновые задачи
+    app.on_startup.append(start_background_tasks)
+    app.on_cleanup.append(cleanup_background_tasks)
+    
+    return app
 
 async def main():
-    await start_http_server()
-    print("🚀 MarvelMarket Stats Bot запущен!")
-    await send_updates()
+    app = await create_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    
+    logger.info(f"🌐 HTTP сервер аналитика запущен на порту {PORT}")
+    logger.info("🎯 MarvelMarket Analyst Bot запущен!")
+    
+    # Бесконечный цикл для поддержания работы
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
+    # Проверяем наличие обязательных переменных
+    if not all([TELEGRAM_BOT_TOKEN, CHANNEL_ID, CMC_API_KEY]):
+        logger.error("❌ Не установлены все необходимые переменные окружения!")
+        exit(1)
+    
+    logger.info("✅ Все переменные окружения установлены")
     asyncio.run(main())
