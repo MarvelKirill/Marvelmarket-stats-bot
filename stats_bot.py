@@ -1,15 +1,15 @@
 import os
 import asyncio
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Bot
 from telegram.constants import ParseMode
 from aiohttp import web
 import logging
+import traceback
 
 # ================ НАСТРОЙКИ ================
-# Используем те же имена переменных что и в первом боте
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_ANALYST_BOT_TOKEN')
 CHANNEL_ID = os.environ.get('CHANNEL_ID')
 CMC_API_KEY = os.environ.get('CMC_API_KEY')
 PORT = int(os.environ.get('PORT', 10001))
@@ -258,9 +258,18 @@ async def send_analyst_digest():
     """Отправляем аналитический дайджест"""
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     
+    # Первое сообщение при запуске
+    try:
+        logger.info("🚀 ПЕРВЫЙ ЗАПУСК - отправляем аналитику...")
+        message = await create_analyst_digest()
+        await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode=ParseMode.HTML)
+        logger.info(f"✅ Первая аналитика отправлена: {datetime.now()}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при первой отправке: {e}")
+    
     while True:
         try:
-            logger.info("Подготовка аналитического дайджеста...")
+            logger.info("🔄 Подготовка аналитического дайджеста...")
             
             message = await create_analyst_digest()
             await bot.send_message(
@@ -272,56 +281,58 @@ async def send_analyst_digest():
             logger.info(f"✅ Аналитический дайджест отправлен: {datetime.now()}")
             
             # Ждем 4 часа до следующего дайджеста
-            await asyncio.sleep(14400)
+            logger.info("⏰ Ожидание 4 часа до следующего дайджеста...")
+            await asyncio.sleep(14400)  # 4 часа
             
         except Exception as e:
             logger.error(f"❌ Ошибка в send_analyst_digest: {e}")
-            await asyncio.sleep(300)
+            await asyncio.sleep(300)  # Ждем 5 минут при ошибке
 
 async def health_check(request):
     return web.Response(text="🎯 MarvelMarket Analyst Bot is running!")
 
-async def start_background_tasks(app):
-    app['analyst_task'] = asyncio.create_task(send_analyst_digest())
-
-async def cleanup_background_tasks(app):
-    if 'analyst_task' in app:
-        app['analyst_task'].cancel()
-        try:
-            await app['analyst_task']
-        except asyncio.CancelledError:
-            pass
-
-async def create_app():
+async def start_http_server():
+    """Запускаем минимальный HTTP сервер только для проверки порта"""
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
-    app.on_startup.append(start_background_tasks)
-    app.on_cleanup.append(cleanup_background_tasks)
-    return app
-
-async def main():
-    app = await create_app()
+    
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     
-    logger.info(f"🌐 HTTP сервер аналитика запущен на порту {PORT}")
-    logger.info("🎯 MarvelMarket Analyst Bot запущен!")
-    
-    # Проверяем переменные
-    logger.info(f"TELEGRAM_BOT_TOKEN: {'✅' if TELEGRAM_BOT_TOKEN else '❌'}")
+    logger.info(f"🌐 HTTP сервер запущен на порту {PORT} (только для проверки Render)")
+    return runner
+
+async def main():
+    # ПРОВЕРЯЕМ ПЕРЕМЕННЫЕ ПРИ СТАРТЕ
+    logger.info("🔍 Проверка переменных окружения...")
+    logger.info(f"TELEGRAM_ANALYST_BOT_TOKEN: {'✅' if TELEGRAM_BOT_TOKEN else '❌'}")
     logger.info(f"CHANNEL_ID: {'✅' if CHANNEL_ID else '❌'}")
     logger.info(f"CMC_API_KEY: {'✅' if CMC_API_KEY else '❌'}")
     
-    while True:
-        await asyncio.sleep(3600)
-
-if __name__ == "__main__":
     if not all([TELEGRAM_BOT_TOKEN, CHANNEL_ID, CMC_API_KEY]):
         logger.error("❌ Не установлены все необходимые переменные окружения!")
         exit(1)
     
     logger.info("✅ Все переменные окружения установлены")
+    
+    # Запускаем HTTP сервер на 30 секунд чтобы Render увидел порт
+    logger.info("🔄 Запускаем HTTP сервер для проверки порта...")
+    runner = await start_http_server()
+    
+    # Ждем 30 секунд чтобы Render успел проверить порт
+    logger.info("⏳ Ожидаем 30 секунд для проверки порта Render...")
+    await asyncio.sleep(30)
+    
+    # Останавливаем HTTP сервер - он больше не нужен
+    logger.info("🛑 Останавливаем HTTP сервер...")
+    await runner.cleanup()
+    
+    # Запускаем основную задачу
+    logger.info("🎯 Запуск основной задачи отправки аналитики...")
+    await send_analyst_digest()
+
+if __name__ == "__main__":
     asyncio.run(main())
